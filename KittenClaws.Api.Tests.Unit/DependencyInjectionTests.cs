@@ -1,0 +1,104 @@
+namespace KittenClaws.Api.Tests.Unit;
+
+using System;
+using System.Collections.Generic;
+using Microsoft.Azure.Cosmos;
+using Microsoft.Extensions.Configuration;
+using Xunit;
+
+public class DependencyInjectionTests
+{
+    private static IConfiguration Configuration(Dictionary<string, string?> values) =>
+        new ConfigurationBuilder().AddInMemoryCollection(values).Build();
+
+    private const string AzureConnection = "AccountEndpoint=https://account.documents.azure.com:443/;AccountKey=a2V5;";
+    private const string HttpEmulatorConnection = "AccountEndpoint=http://localhost:8081/;AccountKey=a2V5;";
+    private const string HttpsEmulatorConnection = "AccountEndpoint=https://localhost:8081/;AccountKey=a2V5;";
+    private const string KeylessConnection = "AccountEndpoint=https://account.documents.azure.com:443/;";
+
+    [Theory]
+    [InlineData(AzureConnection, true)]
+    [InlineData("accountendpoint=http://localhost:8081/;accountkey=a2V5", true)]
+    [InlineData(KeylessConnection, false)]
+    [InlineData("AccountEndpoint=https://account.documents.azure.com:443/;AccountKey=;", false)]
+    public void HasAccountKey_DetectsANonEmptyAccountKey(string connectionString, bool expected)
+    {
+        Assert.Equal(expected, DependencyInjection.HasAccountKey(connectionString));
+    }
+
+    [Fact]
+    public void CreateCosmosClient_WithAnAccountKey_UsesTheConnectionString()
+    {
+        using var client = DependencyInjection.CreateCosmosClient(HttpEmulatorConnection, new CosmosClientOptions());
+
+        Assert.Equal(new Uri("http://localhost:8081/"), client.Endpoint);
+    }
+
+    [Fact]
+    public void CreateCosmosClient_WithoutAnAccountKey_UsesTheAccountEndpointAndACredential()
+    {
+        using var client = DependencyInjection.CreateCosmosClient(KeylessConnection, new CosmosClientOptions());
+
+        Assert.Equal(new Uri("https://account.documents.azure.com:443/"), client.Endpoint);
+    }
+
+    [Fact]
+    public void CreateCosmosClient_WithoutAnAccountKeyOrEndpoint_Throws()
+    {
+        Assert.Throws<InvalidOperationException>(() => DependencyInjection.CreateCosmosClient("AccountKey=;", new CosmosClientOptions()));
+    }
+
+    [Fact]
+    public void CreateCosmosClientOptions_WithoutTheEmulatorFlag_KeepsProductionSettings()
+    {
+        var options = DependencyInjection.CreateCosmosClientOptions(Configuration([]), AzureConnection);
+
+        Assert.Equal(ConnectionMode.Direct, options.ConnectionMode);
+        Assert.False(options.LimitToEndpoint);
+        Assert.Null(options.ServerCertificateCustomValidationCallback);
+        Assert.Equal(TimeSpan.FromSeconds(5), options.RequestTimeout);
+    }
+
+    [Fact]
+    public void CreateCosmosClientOptions_EmulatorFlagFalse_KeepsProductionSettings()
+    {
+        var configuration = Configuration(new() { ["CosmosDbEmulator"] = "false", ["CosmosDbConnectionMode"] = "Gateway" });
+
+        var options = DependencyInjection.CreateCosmosClientOptions(configuration, HttpsEmulatorConnection);
+
+        Assert.Equal(ConnectionMode.Gateway, options.ConnectionMode);
+        Assert.False(options.LimitToEndpoint);
+        Assert.Null(options.ServerCertificateCustomValidationCallback);
+    }
+
+    [Fact]
+    public void CreateCosmosClientOptions_Emulator_UsesGatewayModeAndTheConfiguredEndpointOnly()
+    {
+        var configuration = Configuration(new() { ["CosmosDbEmulator"] = "true", ["CosmosDbConnectionMode"] = "Direct" });
+
+        var options = DependencyInjection.CreateCosmosClientOptions(configuration, HttpEmulatorConnection);
+
+        Assert.Equal(ConnectionMode.Gateway, options.ConnectionMode);
+        Assert.True(options.LimitToEndpoint);
+        Assert.Null(options.ServerCertificateCustomValidationCallback);
+    }
+
+    [Fact]
+    public void CreateCosmosClientOptions_HttpsEmulator_SkipsCertificateValidation()
+    {
+        var configuration = Configuration(new() { ["CosmosDbEmulator"] = "true" });
+
+        var options = DependencyInjection.CreateCosmosClientOptions(configuration, HttpsEmulatorConnection);
+
+        Assert.NotNull(options.ServerCertificateCustomValidationCallback);
+        Assert.True(options.ServerCertificateCustomValidationCallback(null!, null!, default));
+    }
+
+    [Fact]
+    public void CreateCosmosClientOptions_InvalidConnectionMode_Throws()
+    {
+        var configuration = Configuration(new() { ["CosmosDbConnectionMode"] = "Tcp" });
+
+        Assert.Throws<InvalidOperationException>(() => DependencyInjection.CreateCosmosClientOptions(configuration, AzureConnection));
+    }
+}
